@@ -1,0 +1,10 @@
+{
+  "cookies": {
+    "JSESSIONID": "3B915F3F68F24DF321B34B502B7BDA75",
+    "TokenKey": "sakuraeyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJUMXNwb3J0X1NKIiwiY3JlYXRlZCI6MTc4NTA2NDY0Mjg4OCwiZXhwIjoxNzg1MTUxMDQyfQ.WI5O-_rehzin6Vtk5EbgRw8qAlmQATHtBLqLtdCnc_UvN0qQoK6KYvf6f6L_-u2q72jxGG34VwCwxwH-Az7jDQ",
+    "TokenHeaderKey": "sakura",
+    "UidKey": "60414"
+  },
+  "sakura": "sakuraeyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJUMXNwb3J0X1NKIiwiY3JlYXRlZCI6MTc4NTA2NDY0Mjg4OCwiZXhwIjoxNzg1MTUxMDQyfQ.WI5O-_rehzin6Vtk5EbgRw8qAlmQATHtBLqLtdCnc_UvN0qQoK6KYvf6f6L_-u2q72jxGG34VwCwxwH-Az7jDQ",
+  "sakura_header_name": "sakura"
+}

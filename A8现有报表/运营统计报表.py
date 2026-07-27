@@ -1,0 +1,273 @@
+import requests
+import platfrom_config
+from platfrom_config import get_platfrom_cookies
+import get_cookies
+import time
+import json
+import psycopg2
+from psycopg2 import sql
+from typing import List, Optional
+
+
+yesterday = time.localtime(time.time() - 24 * 3600)
+sinceDay = time.localtime(time.time() -  31 *24 * 3600)
+
+startTime = int(time.mktime((sinceDay.tm_year, sinceDay.tm_mon, sinceDay.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
+endTime = int(time.mktime((yesterday.tm_year, yesterday.tm_mon, yesterday.tm_mday, 23, 59, 59, 0, 0, -1)) * 1000)
+print("startTime:", startTime, "endTime:", endTime)
+
+
+# 唯一建约束，按目标表名或报表类型配置
+TABLE_CONFLICT_COLUMNS = {
+    "A8_opration_data": ["statisDate"],
+    "M9_opration_data": ["statisDate"], 
+    "T1_opration_data": ["statisDate"],
+    "A8_deposit_member_record": ["OderNo"],
+    "M9_deposit_member_record": ["OderNo"],
+    "T1_deposit_member_record": ["OderNo"],
+    "A8_game_statistics_report":["reportDate"],
+    "M9_game_statistics_report":["reportDate"], 
+    "T1_game_statistics_report":["reportDate"],
+    "A8_platfrom_daily_revenue":["reportDate"],
+    "M9_platfrom_daily_revenue":["reportDate"],
+    "T1_platfrom_daily_revenue":["reportDate"]
+}
+
+# URL key -> table suffix mapping
+URL_TABLE_MAP = {
+    "opr_url": "opration_data",
+    "game_url": "game_statistics_report",
+    "dRe_url": "deposit_member_record",
+    "kpi_url": "platfrom_daily_revenue",
+}
+
+
+def get_conflict_columns(table_name: str) -> List[str]:
+    return TABLE_CONFLICT_COLUMNS.get(table_name, [])
+
+
+def upload_to_db(
+    plat: str,
+    url_or_table: str,
+    result_list,
+    conflict_cols: Optional[List[str]] = None,
+):
+    """Upload items to PostgreSQL table. `url_or_table` may be a URL key (e.g. 'game_url') or a table name."""
+    # determine target table name from url_or_table
+    if url_or_table in URL_TABLE_MAP:
+        suffix = URL_TABLE_MAP[url_or_table]
+        table_name = f"{plat}_{suffix}"
+    elif url_or_table.endswith("_url"):
+        suffix = url_or_table.replace("_url", "")
+        table_name = f"{plat}_{suffix}_data"
+    else:
+        table_name = url_or_table
+    if result_list is None:
+        print(f"❌ {plat} 没有要上传的数据")
+        return False
+
+    if not isinstance(result_list, list):
+        result_list = [result_list]
+
+    if not result_list:
+        print(f"❌ {plat} 结果列表为空，不执行插入")
+        return False
+
+    if conflict_cols is None:
+        conflict_cols = get_conflict_columns(table_name)
+
+    conn_params = {
+        "host": "localhost",
+        "port": 5432,
+        "dbname": "postgres",
+        "user": "postgres",
+        "password": "147258",
+    }
+
+    table_identifier = sql.Identifier(table_name)
+    columns = list(result_list[0].keys())
+    columns_sql = sql.SQL(', ').join(sql.Identifier(col) for col in columns)
+    values_sql = sql.SQL(', ').join(sql.Placeholder() for _ in columns)
+
+
+    if conflict_cols:
+        valid_conflict_cols = [col for col in conflict_cols if col in columns]
+        if valid_conflict_cols:
+            conflict_sql = sql.SQL(', ').join(sql.Identifier(col) for col in valid_conflict_cols)
+
+            insert_sql = sql.SQL(
+                "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING"
+            ).format(table_identifier, columns_sql, values_sql, conflict_sql)
+
+        else:
+            print(f"⚠️ {plat} 冲突列 {conflict_cols} 未全部在结果列中找到，改为无冲突插入")
+            insert_sql = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(table_identifier, columns_sql, values_sql)
+    else:
+        insert_sql = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(table_identifier, columns_sql, values_sql)
+
+
+    try:
+        inserted_count = 0
+        with psycopg2.connect(**conn_params) as conn:
+            with conn.cursor() as cur:
+                for item in result_list:
+                    values = [item.get(col) for col in columns]
+                    cur.execute(insert_sql, values)
+                    # cur.rowcount for INSERT returns 1 when a row was inserted, 0 when skipped by ON CONFLICT
+                    rc = getattr(cur, 'rowcount', 0) or 0
+                    try:
+                        if isinstance(rc, int) and rc > 0:
+                            inserted_count += rc
+                    except Exception:
+                        pass
+
+        if conflict_cols:
+            print(f"✅ {plat} 实际插入 {inserted_count} / {len(result_list)} 条到 {table_name}，冲突列: {conflict_cols}")
+        else:
+            print(f"✅ {plat} 实际插入 {inserted_count} / {len(result_list)} 条到 {table_name}")
+        return True
+    except Exception as exc:
+        print(f"❌ {plat} 上传数据库失败: {exc}")
+        return False
+
+
+def calw(plat, url_key: str, startTime, endTime):
+    """Fetch report for given url_key from platfrom_config and return result list."""
+    print(f"正在处理平台: {plat} {url_key}")
+    config = platfrom_config.get_platfrom_config(plat)
+    if not config:
+        print(f"❌ 未找到平台配置: {plat}")
+        return None
+
+    URL = config.get(url_key)
+    if not URL:
+        print(f"❌ {plat} 未配置 {url_key}")
+        return None
+
+    cookies_data = get_platfrom_cookies(plat)
+    if not cookies_data or not isinstance(cookies_data, dict):
+        print(f"❌ {plat} 未能读取 cookies 数据，请检查 session/cookies_{plat}.json 是否存在")
+        return None
+
+    cookies_dict = cookies_data.get("cookies") or {}
+    sakura_value = cookies_data.get("sakura")
+    cookie_header = "; ".join(f"{name}={value}" for name, value in cookies_dict.items())
+
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "accept-language": "zh-CN",
+        "agentflag": "0",
+        "content-type": "application/json",
+        "cookie": cookie_header,
+        "referer": URL,
+        "sakura": sakura_value,
+        "udid": "1683281bb5fec480e3ed98ed3347af89",
+        "user-agent": "Mozilla/5.0",
+        "usertype": "2",
+        "x-language": "CN",
+    }
+
+    payload = {
+        "startTime": startTime,
+        "endTime": endTime,
+        "pageNum": 1,
+        "pageSize": 1000,
+    }
+
+    for attempt in range(2):
+        try:
+            response = requests.post(URL, headers=headers, json=payload, timeout=20)
+        except Exception as e:
+            print(f"❌ {plat} 请求异常: {e}")
+            return None
+
+        if response.status_code == 200:
+            try:
+                resp_json = response.json()
+            except Exception:
+                print(f"❌ {plat} {url_key} 返回无法解析为 JSON")
+                return None
+
+            data = resp_json.get("data")
+            result_list = None
+            if isinstance(data, dict) and "list" in data:
+                result_list = data["list"]
+            elif isinstance(data, list):
+                result_list = data
+            elif resp_json.get("rows"):
+                result_list = resp_json.get("rows")
+
+            if not result_list:
+                print(f"❌ {plat} {url_key} 未获取到数据或列表为空")
+                return None
+
+            print(f"{plat} {url_key} 已抓取数据: {len(result_list)} 条")
+            return result_list
+
+        if response.status_code == 401 or (response.status_code == 200 and response.json().get("code") == 401):
+            print(f"❌ {plat} {url_key} 请求未授权, Cookie 过期或无效")
+            if get_cookies.main(plat):
+                cookies_data = get_platfrom_cookies(plat)
+                if cookies_data and isinstance(cookies_data, dict):
+                    cookies_dict = cookies_data.get("cookies") or {}
+                    sakura_value = cookies_data.get("sakura")
+                    cookie_header = "; ".join(f"{name}={value}" for name, value in cookies_dict.items())
+                    headers["cookie"] = cookie_header
+                    headers["sakura"] = sakura_value
+                    print(f"已刷新 {plat} {url_key} 请求头")
+                    time.sleep(1)
+                    continue
+                print(f"❌ {plat} 刷新后仍未读取到 cookies 数据")
+                return None
+            print(f"❌ {plat} 刷新 Cookie 失败")
+            return None
+
+        print(f"❌ {plat} {url_key} 请求失败，状态码: {response.status_code}")
+        return None
+
+
+
+def main(plat: str, startTime: int, endTime: int):
+    # iterate over the four report endpoints and upload each
+    keys = ["opr_url", "game_url",  "kpi_url"]
+    for key in keys:
+        try:
+            key_start_time = startTime
+            key_end_time = endTime
+
+            # For opr_url only: include today in request window (yesterday no subtraction).
+            if key == "opr_url":
+                opr_yesterday = time.localtime(time.time())   #不减，保留今天时间，不然昨日api数据不返回
+                opr_since_day = time.localtime(time.time() - 31 * 24 * 3600)
+                key_start_time = int(time.mktime((opr_since_day.tm_year, opr_since_day.tm_mon, opr_since_day.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
+                key_end_time = int(time.mktime((opr_yesterday.tm_year, opr_yesterday.tm_mon, opr_yesterday.tm_mday, 23, 59, 59, 0, 0, -1)) * 1000)
+
+            result_list = calw(plat, key, key_start_time, key_end_time)
+            if key == "opr_url":
+                # print(result_list)
+
+                # Do not upload today's opr data to DB.
+                if result_list:
+                    today_str = time.strftime("%Y-%m-%d", time.localtime())
+                    original_count = len(result_list)
+                    result_list = [
+                        row for row in result_list
+                        if not (isinstance(row, dict) and str(row.get("statisDate")) == today_str)
+                    ]
+                    skipped_count = original_count - len(result_list)
+                    if skipped_count > 0:
+                        print(f"⚠️ {plat} opr_url 已过滤当天数据 {today_str} {skipped_count} 条，不上传数据库")
+           
+            if result_list:
+                upload_to_db(plat, key, result_list)
+        except Exception as e:
+            print(f"❌ {plat} 处理 {key} 时出错: {e}")
+
+
+if __name__ == "__main__":
+    platfrom_name =  ['A8','M9','T1']
+
+    for plat in platfrom_name:
+        main(plat, startTime, endTime)
+    
+
